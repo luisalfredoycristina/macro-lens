@@ -9,8 +9,6 @@
     "5432": { "label": "PostgreSQL" }
   },
 
-  "postCreateCommand": "bash .devcontainer/setup.sh",
-
   "customizations": {
     "vscode": {
       "extensions": [
