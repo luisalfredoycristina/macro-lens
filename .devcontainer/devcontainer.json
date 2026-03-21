@@ -1,16 +1,11 @@
 {
   "name": "Macro Lens",
-  "image": "mcr.microsoft.com/devcontainers/python:3.12",
-
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
-    "ghcr.io/devcontainers/features/postgresql:1": { "version": "16" }
-  },
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
 
   "forwardPorts": [3000, 8000, 5432],
   "portsAttributes": {
-    "3000": { "label": "Frontend (Next.js)" },
-    "8000": { "label": "Backend (FastAPI)" },
+    "3000": { "label": "Frontend (Next.js)", "onAutoForward": "openPreview" },
+    "8000": { "label": "Backend (FastAPI)", "onAutoForward": "notify" },
     "5432": { "label": "PostgreSQL" }
   },
 
@@ -20,13 +15,9 @@
     "vscode": {
       "extensions": [
         "ms-python.python",
-        "ms-python.vscode-pylance",
         "bradlc.vscode-tailwindcss",
         "esbenp.prettier-vscode"
-      ],
-      "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python"
-      }
+      ]
     }
   }
 }

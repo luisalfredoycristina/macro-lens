@@ -1,37 +1,33 @@
 #!/bin/bash
 set -e
 
-echo "=== Setting up Macro Lens ==="
+echo "=== Macro Lens Setup ==="
 
 # ── PostgreSQL ──────────────────────────────────────────────────────────────
-echo "→ Starting PostgreSQL..."
-sudo service postgresql start
+echo "→ Setting up PostgreSQL..."
+sudo service postgresql start || true
+sleep 2
 sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';" 2>/dev/null || true
-sudo -u postgres createdb macrolens 2>/dev/null || echo "  DB already exists"
+sudo -u postgres createdb macrolens 2>/dev/null || echo "  macrolens db already exists"
 
 # ── Backend ─────────────────────────────────────────────────────────────────
-echo "→ Installing backend dependencies..."
+echo "→ Installing Python dependencies..."
 cd /workspaces/macro-lens/backend
-pip install --quiet poetry
-poetry config virtualenvs.create false
-poetry install --no-interaction --quiet
+pip install --quiet -r requirements.txt
 
-# Create .env from example if it doesn't exist
+# Create .env if missing
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "  Created backend/.env — add your FRED_API_KEY to it"
+  echo "  ✅ Created backend/.env"
 fi
 
-# ── Frontend ─────────────────────────────────────────────────────────────────
-echo "→ Installing frontend dependencies..."
+# ── Frontend ────────────────────────────────────────────────────────────────
+echo "→ Installing Node dependencies..."
 cd /workspaces/macro-lens/frontend
 npm install --silent
 
 echo ""
-echo "✅ Setup complete!"
-echo ""
-echo "Next steps:"
-echo "  1. Open backend/.env and set FRED_API_KEY=your_key"
-echo "  2. Start backend:  cd backend && uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --reload"
-echo "  3. Start frontend: cd frontend && npm run dev"
-echo "  4. Load data:      python -m backend.cron --full-backfill"
+echo "✅ All done! Next:"
+echo "  1. Add your FRED key: nano /workspaces/macro-lens/backend/.env"
+echo "  2. Start backend:     cd /workspaces/macro-lens && uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --reload"
+echo "  3. Start frontend:    cd /workspaces/macro-lens/frontend && npm run dev"
