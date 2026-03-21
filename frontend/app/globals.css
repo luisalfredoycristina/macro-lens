@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --teal: #1D9E75;
+  --teal-light: #E1F5EE;
+  --amber: #BA7517;
+  --amber-light: #FAEEDA;
+  --coral: #993C1D;
+  --coral-light: #FAECE7;
+  --purple: #3C3489;
+  --purple-light: #EEEDFE;
+}
+
+body {
+  @apply bg-gray-50 text-gray-900 antialiased;
+}

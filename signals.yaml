@@ -1,0 +1,99 @@
+# Macro Lens — Signal Registry
+# Edit thresholds here without touching Python code.
+# Add new signals by adding entries here + a matching evaluator in signals/engine.py
+
+signals:
+  - name: "Yield Curve Inversion"
+    description: "10Y-2Y Treasury spread negative in 3+ of last 5 daily observations"
+    direction: BEARISH
+    conviction: 3
+    priority: P0
+    trade_implication: "Long short-duration Treasuries. Consider flattener. Recession hedge."
+    conditions:
+      - series: T10Y2Y
+        operator: lt
+        threshold: 0.0
+        consecutive: 3
+
+  - name: "Sahm Recession Alert"
+    description: "Sahm Real-Time indicator >= 0.5 signals recession underway"
+    direction: BEARISH
+    conviction: 3
+    priority: P0
+    trade_implication: "Risk-off: long USD, long gold, reduce equity exposure."
+    conditions:
+      - series: SAHMREALTIME
+        operator: gte
+        threshold: 0.5
+
+  - name: "Stagflation Alert"
+    description: "CPI MoM > 0.3% AND GDP QoQ < 0.5%"
+    direction: BEARISH
+    conviction: 3
+    priority: P0
+    trade_implication: "Long gold and real assets. Short nominal bonds. Avoid growth equities."
+    conditions:
+      - series: CPIAUCSL
+        operator: mom_gt
+        threshold: 0.3
+      - series: GDPC1
+        operator: qoq_lt
+        threshold: 0.5
+
+  - name: "PPI-CPI Margin Squeeze"
+    description: "Producer prices rising faster than consumer prices — compresses corporate margins"
+    direction: BEARISH
+    conviction: 2
+    priority: P0
+    trade_implication: "Short consumer discretionary equities. Commodities producers may benefit."
+    conditions:
+      - series: [PPIACO, CPIAUCSL]
+        operator: yoy_gap_gt
+        threshold: 3.0
+
+  - name: "Reflation Signal"
+    description: "GDP accelerating AND CPI below 2.5% — ideal risk-on environment"
+    direction: BULLISH
+    conviction: 2
+    priority: P1
+    trade_implication: "Long EM equities and cyclicals. Short USD. Risk-on positioning."
+    conditions:
+      - series: GDPC1
+        operator: qoq_accelerating
+      - series: CPIAUCSL
+        operator: yoy_lt
+        threshold: 2.5
+
+  - name: "EM Reserves Stress"
+    description: "Any tracked EM country reserves declined > 10% YoY"
+    direction: BEARISH
+    conviction: 2
+    priority: P1
+    trade_implication: "Long USD vs stressed EM FX. Monitor for currency crisis contagion."
+    conditions:
+      - indicator: FI.RES.TOTL.CD
+        operator: yoy_lt
+        threshold: -10.0
+        scope: EM_COUNTRIES
+
+  - name: "Commodity Supply Shock"
+    description: "Energy or food commodity price up > 15% in 3 months"
+    direction: BEARISH
+    conviction: 2
+    priority: P2
+    trade_implication: "Long energy/agriculture commodity FX (AUD, BRL, CAD, NOK)."
+    conditions:
+      - series: DCOILWTICO
+        operator: chg_3m_gt
+        threshold: 15.0
+
+  - name: "Fed Policy Pivot"
+    description: "Fed Funds Rate declining for 2+ consecutive months from a peak"
+    direction: BULLISH
+    conviction: 2
+    priority: P1
+    trade_implication: "Long duration bonds. Risk-on equities. Weakening USD expected."
+    conditions:
+      - series: FEDFUNDS
+        operator: declining_consecutive
+        periods: 2
