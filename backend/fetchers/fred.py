@@ -43,6 +43,18 @@ FRED_SERIES = [
     ("GOLDAMGBD228NLBM",   "Gold Price USD/troy oz (daily)"),
     ("DCOILWTICO",         "WTI Crude Oil Price (daily)"),
     ("M2SL",               "M2 Money Supply (monthly)"),
+    # CPI components (for inflation nowcast)
+    ("CPILFESL",           "Core CPI (less food and energy, monthly)"),
+    ("CPIFABSL",           "CPI Food and Beverages (monthly)"),
+    ("CPIUFDSL",           "CPI Food at Home (monthly)"),
+    ("CPIENGSL",           "CPI Energy (monthly)"),
+    ("CPIAPPSL",           "CPI Apparel (monthly)"),
+    ("CPIMEDSL",           "CPI Medical Care Services (monthly)"),
+    ("CUSR0000SAS4",       "CPI Shelter (monthly)"),
+    ("CUSR0000SETA01",     "CPI New Vehicles (monthly)"),
+    ("CUSR0000SETA02",     "CPI Used Cars and Trucks (monthly)"),
+    ("CUSR0000SETB01",     "CPI Motor Fuel (monthly)"),
+    ("CUSR0000SEHA",       "CPI Rent of Primary Residence (monthly)"),
 ]
 
 async def fetch_series(client: httpx.AsyncClient, series_id: str, api_key: str,

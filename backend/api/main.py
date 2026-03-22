@@ -8,9 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, and_, text
 from sqlalchemy.dialects.postgresql import insert
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 import logging
+import httpx
+import asyncio
+import re
 
 from ..db.database import get_db, init_db
 from ..db.models import MacroSeries, Signal, AlertConfig
@@ -365,3 +368,370 @@ async def trigger_fetch(db: AsyncSession = Depends(get_db)):
     fired = await run_signal_engine(db)
     await dispatch_pending_alerts(db)
     return {"status": "complete", "signals_fired": len(fired)}
+
+
+# ── News feed ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/news")
+async def get_news(countries: str = "USA,CHN,DEU,JPN,GBR,BRA,IND,MEX,KOR,TUR"):
+    """
+    Fetch economic news per country from GDELT (free, no key needed).
+    countries: comma-separated ISO3 codes
+    """
+    from ..fetchers.news import fetch_multi_country_news
+    codes = [c.strip().upper() for c in countries.split(",") if c.strip()]
+    news_map = await fetch_multi_country_news(codes, n_each=5)
+
+    # Aggregate overall sentiment per country
+    result = {}
+    for cc, articles in news_map.items():
+        if not articles:
+            result[cc] = {"articles": [], "avg_sentiment": 50, "dominant_tone": "neutral"}
+            continue
+        avg = round(sum(a["sentiment_score"] for a in articles) / len(articles))
+        tones = [a["tone"] for a in articles]
+        dominant = max(set(tones), key=tones.count)
+        result[cc] = {
+            "articles": articles,
+            "avg_sentiment": avg,
+            "dominant_tone": dominant,
+        }
+
+    return {"news": result}
+
+
+# ── Inflation nowcast ─────────────────────────────────────────────────────────
+
+_CPI_COMPONENTS = [
+    ("CPIAUCSL",       "Headline CPI",          "total"),
+    ("CPILFESL",       "Core CPI",              "core"),
+    ("CPIFABSL",       "Food & Beverages",      "food"),
+    ("CPIUFDSL",       "Food at Home",          "food"),
+    ("CPIENGSL",       "Energy",                "energy"),
+    ("CUSR0000SETB01", "Motor Fuel",            "energy"),
+    ("CPIAPPSL",       "Apparel",               "goods"),
+    ("CUSR0000SETA01", "New Vehicles",          "goods"),
+    ("CUSR0000SETA02", "Used Vehicles",         "goods"),
+    ("CUSR0000SAS4",   "Shelter",               "services"),
+    ("CUSR0000SEHA",   "Primary Rent",          "services"),
+    ("CPIMEDSL",       "Medical Care",          "services"),
+]
+
+
+@app.get("/api/inflation-nowcast")
+async def get_inflation_nowcast(db: AsyncSession = Depends(get_db)):
+    """
+    YoY % change for each CPI component — builds the inflation nowcast chart.
+    Uses 13 observations (12 months) to compute year-over-year change.
+    """
+    components = []
+    for series_id, label, category in _CPI_COMPONENTS:
+        vals = await get_recent(db, series_id, n=14)
+        if len(vals) < 13:
+            components.append({
+                "series_id": series_id,
+                "label": label,
+                "category": category,
+                "yoy_pct": None,
+                "mom_pct": None,
+                "latest": None,
+            })
+            continue
+
+        latest_val = vals[0]
+        year_ago_val = vals[12]
+        prior_val = vals[1]
+
+        yoy = round(((latest_val - year_ago_val) / abs(year_ago_val)) * 100, 2) if year_ago_val else None
+        mom = round(((latest_val - prior_val) / abs(prior_val)) * 100, 2) if prior_val else None
+
+        components.append({
+            "series_id": series_id,
+            "label": label,
+            "category": category,
+            "yoy_pct": yoy,
+            "mom_pct": mom,
+            "latest": round(latest_val, 3),
+        })
+
+    # Sort by absolute YoY (biggest movers first), with Nones at end
+    components.sort(
+        key=lambda x: abs(x["yoy_pct"]) if x["yoy_pct"] is not None else -1,
+        reverse=True,
+    )
+
+    # Compute category aggregates
+    categories: dict[str, list[float]] = {}
+    for c in components:
+        if c["yoy_pct"] is not None:
+            categories.setdefault(c["category"], []).append(c["yoy_pct"])
+    cat_summary = {
+        cat: round(sum(vals) / len(vals), 2)
+        for cat, vals in categories.items()
+    }
+
+    return {
+        "components": components,
+        "category_summary": cat_summary,
+        "as_of": str(date.today()),
+    }
+
+
+# ── Macro events calendar ─────────────────────────────────────────────────────
+
+def _build_events_calendar() -> list[dict]:
+    """
+    Return upcoming (and recent) macro events.
+    Events are computed/hardcoded based on known 2026 schedule.
+    """
+    today = date.today()
+    events = []
+
+    # FOMC meetings 2026 (decision day = second day)
+    fomc_dates_2026 = [
+        date(2026, 1, 29), date(2026, 3, 19), date(2026, 5, 7),
+        date(2026, 6, 18), date(2026, 7, 30), date(2026, 9, 17),
+        date(2026, 10, 29), date(2026, 12, 10),
+    ]
+    for d in fomc_dates_2026:
+        events.append({
+            "date": str(d),
+            "event": "FOMC Rate Decision",
+            "category": "central_bank",
+            "importance": "high",
+            "description": "Federal Reserve interest rate decision and statement.",
+            "days_away": (d - today).days,
+        })
+
+    # Non-Farm Payrolls 2026 — first Friday of each month
+    nfp_2026 = [
+        date(2026, 1, 2), date(2026, 2, 6), date(2026, 3, 6),
+        date(2026, 4, 3), date(2026, 5, 1), date(2026, 6, 5),
+        date(2026, 7, 2), date(2026, 8, 7), date(2026, 9, 4),
+        date(2026, 10, 2), date(2026, 11, 6), date(2026, 12, 4),
+    ]
+    for d in nfp_2026:
+        events.append({
+            "date": str(d),
+            "event": "Non-Farm Payrolls (BLS)",
+            "category": "labor",
+            "importance": "high",
+            "description": "Monthly US employment situation report from the Bureau of Labor Statistics.",
+            "days_away": (d - today).days,
+        })
+
+    # CPI releases 2026 (typically 2nd or 3rd Wednesday of following month)
+    cpi_2026 = [
+        date(2026, 1, 14), date(2026, 2, 11), date(2026, 3, 11),
+        date(2026, 4, 10), date(2026, 5, 13), date(2026, 6, 10),
+        date(2026, 7, 14), date(2026, 8, 12), date(2026, 9, 10),
+        date(2026, 10, 14), date(2026, 11, 12), date(2026, 12, 10),
+    ]
+    for d in cpi_2026:
+        events.append({
+            "date": str(d),
+            "event": "CPI Inflation Report (BLS)",
+            "category": "inflation",
+            "importance": "high",
+            "description": "Consumer Price Index release — headline and core inflation readings.",
+            "days_away": (d - today).days,
+        })
+
+    # GDP releases 2026 (advance estimate: last week of January, April, July, October)
+    gdp_2026 = [
+        (date(2026, 1, 29), "Q4 2025 GDP Advance"),
+        (date(2026, 4, 29), "Q1 2026 GDP Advance"),
+        (date(2026, 7, 29), "Q2 2026 GDP Advance"),
+        (date(2026, 10, 28), "Q3 2026 GDP Advance"),
+    ]
+    for d, label in gdp_2026:
+        events.append({
+            "date": str(d),
+            "event": f"GDP {label} (BEA)",
+            "category": "growth",
+            "importance": "high",
+            "description": "Bureau of Economic Analysis advance estimate of GDP growth.",
+            "days_away": (d - today).days,
+        })
+
+    # ECB meetings 2026
+    ecb_2026 = [
+        date(2026, 1, 30), date(2026, 3, 6), date(2026, 4, 30),
+        date(2026, 6, 5), date(2026, 7, 24), date(2026, 9, 11),
+        date(2026, 10, 30), date(2026, 12, 18),
+    ]
+    for d in ecb_2026:
+        events.append({
+            "date": str(d),
+            "event": "ECB Rate Decision",
+            "category": "central_bank",
+            "importance": "medium",
+            "description": "European Central Bank monetary policy decision.",
+            "days_away": (d - today).days,
+        })
+
+    # Sort by date and filter to ±60 days from today
+    events = [e for e in events if -30 <= e["days_away"] <= 90]
+    events.sort(key=lambda x: x["days_away"])
+    return events
+
+
+@app.get("/api/events")
+async def get_events():
+    """Upcoming macro events calendar (FOMC, NFP, CPI, GDP, ECB)."""
+    return {"events": _build_events_calendar()}
+
+
+# ── FOMC minutes analysis ─────────────────────────────────────────────────────
+
+_FOMC_DATES_2026 = [
+    ("2026-01-29", "20260129"),
+    ("2025-12-18", "20251218"),
+    ("2025-11-07", "20251107"),
+    ("2025-09-18", "20250918"),
+    ("2025-07-30", "20250730"),
+    ("2025-06-18", "20250618"),
+    ("2025-05-07", "20250507"),
+    ("2025-03-19", "20250319"),
+    ("2025-01-29", "20250129"),
+]
+
+_HAWKISH_TERMS = [
+    "inflation remain", "above target", "tighten", "restrictive",
+    "overshoot", "elevated", "vigilant", "rate increase", "hike",
+    "upside risk", "persistence", "further increases",
+]
+_DOVISH_TERMS = [
+    "cut", "easing", "accommodative", "below target", "undershooting",
+    "labor market slowing", "downside risk", "pause", "patient",
+    "gradual", "reduce", "lower rate",
+]
+_NEUTRAL_TERMS = [
+    "data dependent", "balanced", "appropriate", "monitor",
+    "assess", "uncertainty", "flexible",
+]
+
+
+def _analyze_minutes_text(text: str) -> dict:
+    """Extract policy signals from raw FOMC minutes HTML text."""
+    text_lower = text.lower()
+
+    hawkish_hits = [(t, text_lower.count(t)) for t in _HAWKISH_TERMS if t in text_lower]
+    dovish_hits = [(t, text_lower.count(t)) for t in _DOVISH_TERMS if t in text_lower]
+    neutral_hits = [(t, text_lower.count(t)) for t in _NEUTRAL_TERMS if t in text_lower]
+
+    hawk_score = sum(c for _, c in hawkish_hits)
+    dove_score = sum(c for _, c in dovish_hits)
+    total = hawk_score + dove_score + 1
+    stance_score = round((hawk_score / total) * 100)  # 0=fully dovish, 100=fully hawkish
+
+    if stance_score >= 60:
+        stance = "HAWKISH"
+    elif stance_score <= 40:
+        stance = "DOVISH"
+    else:
+        stance = "NEUTRAL"
+
+    # Extract key paragraphs — look for policy-relevant sentences
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    key_quotes = []
+    for s in sentences:
+        s = s.strip()
+        s_lower = s.lower()
+        if len(s) < 60 or len(s) > 400:
+            continue
+        if any(k in s_lower for k in ["inflation", "employment", "rate", "policy", "economic"]):
+            # Clean up HTML artifacts
+            s_clean = re.sub(r'\s+', ' ', s).strip()
+            if s_clean and s_clean not in key_quotes:
+                key_quotes.append(s_clean)
+        if len(key_quotes) >= 6:
+            break
+
+    return {
+        "stance": stance,
+        "stance_score": stance_score,
+        "hawkish_count": hawk_score,
+        "dovish_count": dove_score,
+        "hawkish_terms_found": [t for t, _ in hawkish_hits[:5]],
+        "dovish_terms_found": [t for t, _ in dovish_hits[:5]],
+        "key_quotes": key_quotes,
+    }
+
+
+@app.get("/api/fomc")
+async def get_fomc_analysis(db: AsyncSession = Depends(get_db)):
+    """
+    Fetch and analyze the latest available FOMC meeting minutes.
+    Returns policy stance analysis + current macro context from DB.
+    """
+    minutes_text = ""
+    meeting_date = ""
+    minutes_url = ""
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        for meet_date, date_code in _FOMC_DATES_2026:
+            url = f"https://www.federalreserve.gov/monetarypolicy/fomcminutes{date_code}.htm"
+            try:
+                resp = await client.get(url)
+                if resp.status_code == 200 and len(resp.text) > 5000:
+                    # Strip HTML tags
+                    raw = re.sub(r'<[^>]+>', ' ', resp.text)
+                    raw = re.sub(r'&[a-z]+;', ' ', raw)
+                    raw = re.sub(r'\s+', ' ', raw)
+                    minutes_text = raw.strip()
+                    meeting_date = meet_date
+                    minutes_url = url
+                    break
+            except Exception as exc:
+                logger.warning(f"FOMC fetch failed for {date_code}: {exc}")
+                continue
+
+    analysis: dict = {}
+    if minutes_text:
+        analysis = _analyze_minutes_text(minutes_text)
+    else:
+        analysis = {
+            "stance": "UNKNOWN",
+            "stance_score": 50,
+            "hawkish_count": 0,
+            "dovish_count": 0,
+            "hawkish_terms_found": [],
+            "dovish_terms_found": [],
+            "key_quotes": ["Could not fetch FOMC minutes. Check network connectivity."],
+        }
+
+    # Pull current macro context from DB
+    fedfunds_vals = await get_recent(db, "FEDFUNDS", n=13)
+    cpi_vals = await get_recent(db, "CPIAUCSL", n=13)
+    core_vals = await get_recent(db, "CPILFESL", n=13)
+    breakeven = await get_latest(db, "T10YIE")
+    spread = await get_latest(db, "T10Y2Y")
+    unrate = await get_latest(db, "UNRATE")
+    sahm = await get_latest(db, "SAHMREALTIME")
+
+    cpi_yoy = None
+    if len(cpi_vals) >= 13 and cpi_vals[12]:
+        cpi_yoy = round(((cpi_vals[0] - cpi_vals[12]) / abs(cpi_vals[12])) * 100, 2)
+    core_yoy = None
+    if len(core_vals) >= 13 and core_vals[12]:
+        core_yoy = round(((core_vals[0] - core_vals[12]) / abs(core_vals[12])) * 100, 2)
+
+    return {
+        "meeting_date": meeting_date,
+        "minutes_url": minutes_url,
+        "analysis": analysis,
+        "macro_context": {
+            "fed_funds_rate": fedfunds_vals[0] if fedfunds_vals else None,
+            "cpi_yoy_pct": cpi_yoy,
+            "core_cpi_yoy_pct": core_yoy,
+            "breakeven_inflation_10y": breakeven,
+            "yield_curve_spread": spread,
+            "unemployment_rate": unrate,
+            "sahm_rule": sahm,
+            "fed_funds_history": [
+                {"value": v}
+                for v in reversed(fedfunds_vals[:12])
+            ],
+        },
+    }
