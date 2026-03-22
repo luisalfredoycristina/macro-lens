@@ -78,10 +78,10 @@ async def fetch_series(client: httpx.AsyncClient, series_id: str, api_key: str,
 
 
 async def upsert_series(db: AsyncSession, series_id: str, observations: list[dict]):
-    """Upsert observations into macro_series table."""
+    """Upsert observations into macro_series table in batches to avoid PostgreSQL parameter limits."""
     if not observations:
         return
-    rows = [
+    all_rows = [
         {
             "series_id": series_id,
             "country_code": "USA",
@@ -92,12 +92,16 @@ async def upsert_series(db: AsyncSession, series_id: str, observations: list[dic
         }
         for obs in observations
     ]
-    stmt = insert(MacroSeries).values(rows)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["series_id", "country_code", "observation_date"],
-        set_={"value": stmt.excluded.value, "fetched_at": stmt.excluded.fetched_at}
-    )
-    await db.execute(stmt)
+    # PostgreSQL max params = 32767; each row uses 7 params → safe batch = 4000 rows
+    batch_size = 4000
+    for i in range(0, len(all_rows), batch_size):
+        rows = all_rows[i:i + batch_size]
+        stmt = insert(MacroSeries).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["series_id", "country_code", "observation_date"],
+            set_={"value": stmt.excluded.value, "fetched_at": stmt.excluded.fetched_at}
+        )
+        await db.execute(stmt)
     await db.commit()
 
 
