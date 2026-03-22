@@ -27,7 +27,7 @@ app = FastAPI(title="Macro Lens API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://*.vercel.app"],
+    allow_origins=["http://localhost:3000", "https://*.vercel.app", "https://*.app.github.dev"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
